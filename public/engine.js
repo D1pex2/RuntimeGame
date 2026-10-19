@@ -14,6 +14,8 @@ function createGame() {
     platforms: [], entities: [], state: {},
     hooks: {}, toasts: [], parts: [],
     currentMod: null, onError: null,
+    // Сеть: 'solo' | 'host' | 'client'. remotes — другие игроки (их персонажи).
+    role: 'solo', remotes: new Map(), onPatch: null, onInput: null, _seq: 0, _templates: {},
   };
   g.camera = { x: 0, y: 0, zoom: 1, follow: null, shake: 0 };
   g.player = {
@@ -35,9 +37,95 @@ function createGame() {
 
   g.pressed = code => input.justPressed.has(code);
   g.addPlatform = p => { const o = { color: '#5b8c3a', ...p }; g.platforms.push(o); return o; };
-  g.add = e => { const o = { x: 0, y: 0, w: 32, h: 32, vx: 0, vy: 0, color: '#fc0', mod: g.currentMod, ...e }; g.entities.push(o); return o; };
+  // id одинаковые у всех игроков для объектов из настройки модов (моды выполняются в одном порядке).
+  // Объекты, созданные во время игры, создаёт только хост; у клиента они приходят снимками.
+  g.add = e => {
+    const setup = g.currentMod !== null;
+    const o = { x: 0, y: 0, w: 32, h: 32, vx: 0, vy: 0, color: '#fc0', mod: g.currentMod, ...e, id: (setup ? 's' : 'h') + (++g._seq) };
+    if (g.role === 'client' && !setup) {
+      // Сам объект придёт от хоста; запоминаем, как его рисовать.
+      if (o.tag && typeof o.draw === 'function') g._templates[o.tag] = o.draw;
+      return o;
+    }
+    g.entities.push(o); return o;
+  };
   g.remove = e => { e._dead = true; };
   g.find = tag => g.entities.filter(e => e.tag === tag && !e._dead);
+  g.players = () => [g.player, ...g.remotes.values()];
+  g.nearestPlayer = (x, y) => {
+    let best = g.player, bd = Infinity;
+    for (const p of g.players()) {
+      if (p.dead) continue;
+      const d = Math.hypot(p.x + p.w / 2 - x, p.y + p.h / 2 - y);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best;
+  };
+
+  // Хост выполняет fn так, будто game.player — это другой игрок (касания, его нажатия).
+  // Что fn поменяла у этого игрока, уходит ему патчем.
+  const prim = v => v === null || ['number', 'string', 'boolean'].includes(typeof v);
+  g.withPlayer = (p, fn) => {
+    if (p === g.player) return fn();
+    const before = {};
+    for (const k in p) if (prim(p[k])) before[k] = p[k];
+    const saved = g.player, shake = g.camera.shake;
+    g.player = p;
+    try { fn(); }
+    finally {
+      g.player = saved; g.camera.shake = shake;
+      const diff = {};
+      for (const k in p) if (prim(p[k]) && p[k] !== before[k]) diff[k] = p[k];
+      if (Object.keys(diff).length) { p._lock = g.time + 0.4; g.onPatch && g.onPatch(p.id, diff); }
+    }
+  };
+
+  // Снимок мира (делает хост): простые поля всех объектов и game.state.
+  g.snapshot = () => {
+    const ents = [];
+    for (const e of g.entities) {
+      if (e._dead) continue;
+      const o = {};
+      for (const k in e) {
+        const v = e[k];
+        if (k === 'mod' || k[0] === '_' || typeof v === 'function') continue;
+        if (prim(v)) o[k] = v;
+        else if (typeof v === 'object') { try { const s = JSON.stringify(v); if (s.length < 400) o[k] = JSON.parse(s); } catch {} }
+      }
+      ents.push(o);
+    }
+    let state = null;
+    try { state = JSON.parse(JSON.stringify(g.state)); } catch {}
+    return { e: ents, s: state };
+  };
+
+  // Клиент применяет снимок: известные объекты обновляет, новые создаёт, пропавшие убирает.
+  g.applySnapshot = snap => {
+    const byId = new Map(g.entities.map(e => [e.id, e]));
+    const byTag = new Map();
+    for (const e of g.entities) if (e.tag && !byTag.has(e.tag)) byTag.set(e.tag, e);
+    g.entities = snap.e.map(o => {
+      let e = byId.get(o.id);
+      if (!e) {
+        // Новый объект с хоста: функции рисования берём у похожего объекта с тем же tag.
+        const twin = o.tag && byTag.get(o.tag);
+        e = { draw: twin ? twin.draw : (o.tag && g._templates[o.tag]) || null, mod: twin ? twin.mod : null };
+      }
+      if (!e.draw && o.tag && g._templates[o.tag]) e.draw = g._templates[o.tag];
+      return Object.assign(e, o);
+    });
+    if (snap.s) Object.assign(g.state, snap.s);
+  };
+
+  g.emitInput = (kind, ...args) => {
+    if (g.role !== 'client' || !g.onInput) return g.emit(kind, ...args);
+    // Настоящее действие выполнит хост. Локально прогоняем обработчики на копии персонажа:
+    // звук и частицы сразу, а заодно узнаём, как рисовать объекты, которые хост создаст.
+    g.onInput(kind, args);
+    const saved = g.player;
+    g.player = { ...saved };
+    try { g.emit(kind, ...args); } finally { g.player = saved; }
+  };
   g.overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
   g.rand = (a, b) => a + Math.random() * (b - a);
   g.clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -131,13 +219,20 @@ function createGame() {
   };
 
   g.updateEntities = dt => {
+    // У клиента мир считает хост; между снимками просто двигаем объекты по скорости.
+    if (g.role === 'client') {
+      for (const e of g.entities) { e.x += (e.vx || 0) * dt; e.y += e.gravity ? 0 : (e.vy || 0) * dt; }
+      return;
+    }
     for (const e of g.entities) {
       if (e._dead) continue;
       try {
         if (e.gravity) { e.vy += g.gravity * dt; g.moveBody(e, dt); }
         else { e.x += e.vx * dt; e.y += e.vy * dt; }
         if (e.update) e.update(e, dt, g);
-        if (e.onTouch && !g.player.dead && g.overlap(e, g.player)) e.onTouch(e, g.player, g);
+        if (e.onTouch) for (const p of g.players()) {
+          if (!p.dead && !e._dead && g.overlap(e, p)) g.withPlayer(p, () => e.onTouch(e, p, g));
+        }
         if (e.life !== undefined && (e.life -= dt) <= 0) e._dead = true;
       } catch (err) { e._dead = true; g.fail(err, e.mod, 'сущность'); }
     }
@@ -177,6 +272,10 @@ function createGame() {
       if (e.draw) { try { e.draw(c, e, g); } catch (err) { e.draw = null; g.fail(err, e.mod, 'рисование сущности'); } }
       else { c.fillStyle = e.color; c.fillRect(e.x, e.y, e.w, e.h); }
     }
+    for (const r of g.remotes.values()) {
+      try { r.draw = g.player.draw; g.drawPlayer(c, r); } catch (e) { g.fail(e, null, 'drawPlayer'); }
+      if (!r.dead) g.text(c, r.name || 'игрок', r.x + r.w / 2, r.y - 10, { size: 14, align: 'center', color: '#fff' });
+    }
     try { g.drawPlayer(c, g.player); } catch (e) { g.drawPlayer = g._drawPlayerDefault; g.fail(e, null, 'drawPlayer'); }
     for (const q of g.parts) { c.globalAlpha = q.life / q.max; c.fillStyle = q.color; c.fillRect(q.x - q.size / 2, q.y - q.size / 2, q.size, q.size); }
     c.globalAlpha = 1;
@@ -213,7 +312,7 @@ addEventListener('resize', resize);
 addEventListener('keydown', e => {
   if (input.typing) return;
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
-  if (!input.keys.has(e.code)) { input.justPressed.add(e.code); window.game && game.emit('key', e.code); }
+  if (!input.keys.has(e.code)) { input.justPressed.add(e.code); window.game && game.emitInput('key', e.code); }
   input.keys.add(e.code);
 });
 addEventListener('keyup', e => input.keys.delete(e.code));
@@ -222,7 +321,7 @@ canvas.addEventListener('mousemove', e => { input.mouse.x = e.clientX; input.mou
 canvas.addEventListener('mousedown', e => {
   input.mouse.down = true;
   const cam = game.camera;
-  game.emit('click', cam.x + e.clientX / cam.zoom, cam.y + e.clientY / cam.zoom);
+  game.emitInput('click', cam.x + e.clientX / cam.zoom, cam.y + e.clientY / cam.zoom);
 });
 addEventListener('mouseup', () => input.mouse.down = false);
 

@@ -1,11 +1,15 @@
 // Живой платформер: сервер раздаёт игру и держит один постоянный процесс ИИ
 // (Claude CLI или Codex CLI), который превращает фразы игрока в JS-патчи.
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const crypto = require('crypto');
+const { spawn, execFileSync } = require('child_process');
 
 const PORT = Number(process.argv[2] || process.env.PORT) || 5173;
+const HTTPS_PORT = Number(process.argv[3] || process.env.HTTPS_PORT) || PORT + 270;   // 5443 по умолчанию
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, 'public');
 const PROMPT_FILE = path.join(ROOT, 'prompt.md');
@@ -272,13 +276,14 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
-http.createServer(async (req, res) => {
+async function handle(req, res) {
   if (req.method === 'POST' && req.url === '/ask') {
-    const { text, error } = JSON.parse(await readBody(req) || '{}');
+    const { text, error, name } = JSON.parse(await readBody(req) || '{}');
     contextSent = true;
+    const who = name ? `Игрок «${String(name).slice(0, 30)}»` : 'Игрок';
     const prompt = error
       ? `Твой прошлый код упал с ошибкой: ${error}\nПришли исправленный код (только то, что нужно добавить).`
-      : `Игрок: ${text}`;
+      : `${who}: ${text}`;
     console.log('>', prompt.split('\n')[0]);
     try {
       const r = await ask(prompt);
@@ -346,17 +351,145 @@ http.createServer(async (req, res) => {
     json(res, 200, { ...modelInfo(), restarted: needRestart });
     return;
   }
-  const file = path.join(PUBLIC, req.url === '/' ? 'index.html' : decodeURIComponent(req.url.split('?')[0]));
+  const urlPath = decodeURIComponent(req.url.split('?')[0]);
+  const file = path.join(PUBLIC, urlPath === '/' ? 'index.html' : urlPath);
   if (!file.startsWith(PUBLIC)) { res.writeHead(403); res.end(); return; }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404); res.end('not found'); return; }
-    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     res.end(data);
   });
-}).listen(PORT, () => {
-  console.log(`Игра: http://localhost:${PORT}`);
-  active().start(state.model);
-  warmUp();
-});
+}
+
+// ---------- мультиплеер: одна комната, WebSocket без библиотек ----------
+// Сервер хранит общий список изменений и пересылает сообщения. Мир считает хост —
+// первый подключившийся браузер; остальные получают от него снимки мира.
+const room = { clients: new Map(), hostId: null, mods: [], seeded: false, nextId: 1 };
+
+function wsAccept(req, socket) {
+  const key = req.headers['sec-websocket-key'];
+  if (req.url !== '/ws' || !key) { socket.destroy(); return; }
+  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  socket.setNoDelay(true);
+  const client = { id: room.nextId++, socket, name: 'Игрок', player: null, buf: Buffer.alloc(0), parts: [] };
+  socket.on('data', d => { client.buf = Buffer.concat([client.buf, d]); wsParse(client); });
+  socket.on('close', () => leave(client));
+  socket.on('error', () => socket.destroy());
+}
+
+function wsParse(c) {
+  for (;;) {
+    const b = c.buf;
+    if (b.length < 2) return;
+    const fin = b[0] & 0x80, op = b[0] & 0x0f, masked = b[1] & 0x80;
+    let len = b[1] & 0x7f, off = 2;
+    if (len === 126) { if (b.length < 4) return; len = b.readUInt16BE(2); off = 4; }
+    else if (len === 127) { if (b.length < 10) return; len = Number(b.readBigUInt64BE(2)); off = 10; }
+    const maskOff = off; if (masked) off += 4;
+    if (b.length < off + len) return;
+    const data = Buffer.from(b.subarray(off, off + len));
+    if (masked) for (let i = 0; i < len; i++) data[i] ^= b[maskOff + (i & 3)];
+    c.buf = b.subarray(off + len);
+    if (op === 8) { c.socket.end(); return; }
+    if (op === 9) { wsSendRaw(c, data, 10); continue; }
+    if (op === 1 || op === 2 || op === 0) {
+      c.parts.push(data);
+      if (fin) { const text = Buffer.concat(c.parts).toString('utf8'); c.parts = []; onWs(c, text); }
+    }
+  }
+}
+
+function wsSendRaw(c, payload, op = 1) {
+  if (c.socket.destroyed) return;
+  const len = payload.length;
+  const head = len < 126 ? Buffer.from([0x80 | op, len])
+    : len < 65536 ? Buffer.from([0x80 | op, 126, len >> 8, len & 255])
+    : (() => { const h = Buffer.alloc(10); h[0] = 0x80 | op; h[1] = 127; h.writeBigUInt64BE(BigInt(len), 2); return h; })();
+  c.socket.write(Buffer.concat([head, payload]));
+}
+
+const send = (c, msg) => wsSendRaw(c, Buffer.from(typeof msg === 'string' ? msg : JSON.stringify(msg)));
+function broadcast(msg, except) {
+  const s = JSON.stringify(msg);
+  for (const c of room.clients.values()) if (c !== except) send(c, s);
+}
+
+function onWs(c, text) {
+  let m; try { m = JSON.parse(text); } catch { return; }
+  switch (m.t) {
+    case 'hello': {
+      c.name = String(m.name || 'Игрок').slice(0, 20);
+      room.clients.set(c.id, c);
+      // Первый игрок после запуска сервера приносит свои изменения из браузера.
+      if (!room.seeded) { room.seeded = true; if (Array.isArray(m.mods) && !room.mods.length) room.mods = m.mods; }
+      if (!room.hostId || !room.clients.has(room.hostId)) room.hostId = c.id;
+      const players = [...room.clients.values()].filter(o => o !== c).map(o => ({ id: o.id, name: o.name, s: o.player }));
+      send(c, { t: 'welcome', id: c.id, hostId: room.hostId, mods: room.mods, players });
+      broadcast({ t: 'join', id: c.id, name: c.name }, c);
+      console.log(`[net] вошёл ${c.name} (#${c.id}), игроков: ${room.clients.size}, хост #${room.hostId}`);
+      break;
+    }
+    case 'player': c.player = m.s; broadcast({ t: 'player', id: c.id, s: m.s }, c); break;
+    case 'snap': if (c.id === room.hostId) broadcast(m, c); break;
+    case 'patch': { const to = room.clients.get(m.to); if (to && c.id === room.hostId) send(to, { t: 'patch', d: m.d }); break; }
+    case 'event': { const h = room.clients.get(room.hostId); if (h && h !== c) send(h, { t: 'event', from: c.id, kind: m.kind, args: m.args, s: m.s }); break; }
+    case 'commit': room.mods.push(m.mod); broadcast({ t: 'addMod', mod: m.mod, by: c.name }, c); break;
+    case 'setMods': room.mods = m.mods || []; broadcast({ t: 'mods', mods: room.mods, reason: m.reason, by: c.name }, c); break;
+    case 'chat': broadcast({ t: 'chat', by: c.name, text: String(m.text).slice(0, 500) }, c); break;
+  }
+}
+
+function leave(c) {
+  if (!room.clients.delete(c.id)) return;
+  broadcast({ t: 'leave', id: c.id, name: c.name });
+  if (room.hostId === c.id) {
+    const next = room.clients.keys().next();
+    room.hostId = next.done ? null : next.value;
+    if (room.hostId) broadcast({ t: 'host', hostId: room.hostId });
+  }
+  console.log(`[net] вышел ${c.name}, игроков: ${room.clients.size}${room.hostId ? `, хост #${room.hostId}` : ''}`);
+}
+
+// ---------- HTTPS для друзей: без него Chrome не даёт микрофон на чужом адресе ----------
+// Адреса в локальной сети; туннели VPN, WSL и Docker друзьям не нужны.
+function lanIps() {
+  return Object.entries(os.networkInterfaces())
+    .filter(([name]) => !/tun|tap|vpn|wsl|vethernet|docker|outline|happ|wireguard|zerotier|tailscale|loopback/i.test(name))
+    .flatMap(([, list]) => list)
+    .filter(i => i && i.family === 'IPv4' && !i.internal && !i.address.startsWith('169.254.')).map(i => i.address);
+}
+
+function loadCert() {
+  const dir = path.join(ROOT, 'certs'), key = path.join(dir, 'key.pem'), cert = path.join(dir, 'cert.pem');
+  if (!fs.existsSync(key) || !fs.existsSync(cert)) {
+    const openssl = ['openssl', 'C:\\Program Files\\Git\\usr\\bin\\openssl.exe', 'C:\\Program Files\\Git\\mingw64\\bin\\openssl.exe']
+      .find(p => { try { execFileSync(p, ['version'], { stdio: 'ignore' }); return true; } catch { return false; } });
+    if (!openssl) { console.log('[https] openssl не найден, HTTPS выключен (голос у друзей работать не будет)'); return null; }
+    fs.mkdirSync(dir, { recursive: true });
+    const san = ['DNS:localhost', 'IP:127.0.0.1', ...lanIps().map(ip => 'IP:' + ip)].join(',');
+    execFileSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
+      '-days', '825', '-subj', '/CN=RuntimeGame', '-addext', 'subjectAltName=' + san], { stdio: 'ignore' });
+    console.log('[https] создан самоподписанный сертификат в certs/');
+  }
+  return { key: fs.readFileSync(key), cert: fs.readFileSync(cert) };
+}
+
+const servers = [http.createServer(handle).listen(PORT)];
+try {
+  const tls = loadCert();
+  if (tls) servers.push(https.createServer(tls, handle).listen(HTTPS_PORT));
+} catch (e) { console.log('[https] не запустился:', e.message); }
+for (const s of servers) {
+  s.on('upgrade', wsAccept);
+  s.on('error', e => console.log('[http] ошибка:', e.message));
+}
+
+console.log(`Игра: http://localhost:${PORT}`);
+for (const ip of lanIps()) {
+  console.log(`Для друзей в этой сети: http://${ip}:${PORT}` + (servers[1] ? `   с голосом: https://${ip}:${HTTPS_PORT}` : ''));
+}
+active().start(state.model);
+warmUp();
 
 process.on('SIGINT', () => { Object.values(backends).forEach(b => b.stop()); setTimeout(() => process.exit(0), 300); });

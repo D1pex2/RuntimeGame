@@ -10,6 +10,8 @@ canvas { display: block; width: 100vw; height: 100vh; }
 .msg { padding: 6px 10px; border-radius: 8px; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); word-break: break-word; }
 .msg.me { background: rgba(40,90,200,.6); align-self: flex-start; }
 .msg.ai { background: rgba(20,120,70,.6); }
+.msg.other { background: rgba(120,70,190,.6); align-self: flex-start; }
+#net { font-size: 12px; opacity: .8; cursor: default; }
 .msg.err { background: rgba(170,40,40,.7); }
 .msg.wait { opacity: .7; font-style: italic; }
 .msg small { opacity: .7; margin-left: 6px; }

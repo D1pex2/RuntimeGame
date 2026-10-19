@@ -37,6 +37,7 @@ function run(mod) {
 function rebuild() {
   window.game = createGame();
   game.onError = onRuntimeError;
+  net.attach(game);
   for (const m of mods) { const e = run(m); if (e) console.warn('мод', m.id, e); }
   setStatus();
 }
@@ -61,7 +62,7 @@ async function request(body) {
   const wait = addMsg(body.error ? 'чиню ошибку…' : 'думаю…', 'wait');
   const t0 = performance.now();
   try {
-    const r = await fetch('/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const r = await fetch('/ask', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, name: net.name }) });
     const data = await r.json();
     wait.remove();
     if (!r.ok) throw new Error(data.error || r.status);
@@ -73,6 +74,7 @@ async function request(body) {
       if (fixBudget > 0) { fixBudget--; request({ error: err.message }); }
     } else {
       mods.push(mod); save();
+      net.send({ t: 'commit', mod });
       addMsg('✓ ' + describe(data.code), 'ai', secs);
     }
   } catch (e) {
@@ -88,6 +90,7 @@ function sendText(text) {
   if (!text) return;
   if (ai && aiCommand(text)) return;
   addMsg(text, 'me');
+  net.send({ t: 'chat', text });
   fixBudget = 2;
   request({ text });
 }
@@ -111,11 +114,13 @@ addEventListener('keydown', e => {
 $('undo').addEventListener('click', () => {
   if (!mods.length) return;
   const m = mods.pop(); save(); rebuild();
+  net.send({ t: 'setMods', mods, reason: 'undo' });
   addMsg('↶ отменено: ' + m.text, 'ai');
 });
 $('reset').addEventListener('click', async () => {
   if (!confirm('Стереть все изменения и начать заново?')) return;
   mods = []; save(); rebuild(); log.innerHTML = '';
+  net.send({ t: 'setMods', mods, reason: 'reset' });
   addMsg('Мир очищен. Память ИИ тоже сброшена.', 'ai');
   fetch('/reset', { method: 'POST' });
 });
@@ -228,6 +233,7 @@ async function loadGame(name) {
   const data = await r.json();
   if (!r.ok) return addMsg('Не загрузилось: ' + data.error, 'err');
   mods = data.mods; save(); rebuild();
+  net.send({ t: 'setMods', mods, reason: 'load' });
   savesBox.hidden = true;
   addMsg(`📂 Загружено «${name}» (${mods.length} изменений). ИИ получил этот код.`, 'ai');
   fetch('/context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mods: mods.map(m => m.code) }) });
@@ -278,3 +284,5 @@ rebuild();
 addMsg(mods.length
   ? `Восстановлено изменений: ${mods.length}. Пиши или говори, что добавить.`
   : 'Пустой платформер. Enter — написать, ` или 🎤 — сказать голосом, что добавить в игру. Внизу — выбор ИИ (Claude или Codex), модели и ⚡ ускорения.', 'ai');
+net.connect();
+netStatus();
