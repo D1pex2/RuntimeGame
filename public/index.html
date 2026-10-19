@@ -19,9 +19,18 @@
   <div id="tools">
     <button type="button" id="undo" title="Отменить последнее изменение">↶ отмена</button>
     <button type="button" id="reset" title="Стереть всё и начать с пустого платформера">⟲ сброс</button>
-    <select id="model" title="Модель Claude (у всех effort low)"></select>
+    <button type="button" id="saveBtn" title="Сохранить все изменения под именем">💾 сохранить</button>
+    <button type="button" id="loadBtn" title="Загрузить сейв">📂 загрузить</button>
+    <select id="engine" title="Какой ИИ пишет код"></select>
+    <select id="model" title="Модель (у всех effort low)"></select>
+    <label id="fastWrap" title="Ускорение Codex: service tier priority, быстрее, но тратит больше лимита"><input type="checkbox" id="fast"> ⚡ fast</label>
     <span id="status"></span>
   </div>
+</div>
+
+<div id="saves" hidden>
+  <div class="saves-head"><b>Сейвы</b><button type="button" id="savesClose">✕</button></div>
+  <div id="savesList"></div>
 </div>
 
 <script src="engine.js"></script>

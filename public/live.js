@@ -86,8 +86,7 @@ async function request(body) {
 function sendText(text) {
   text = text.trim();
   if (!text) return;
-  const cmd = text.match(/^\/?(?:model|модель)\s+(\S+)/i);
-  if (cmd) return setModel(cmd[1].toLowerCase());
+  if (ai && aiCommand(text)) return;
   addMsg(text, 'me');
   fixBudget = 2;
   request({ text });
@@ -117,40 +116,136 @@ $('undo').addEventListener('click', () => {
 $('reset').addEventListener('click', async () => {
   if (!confirm('Стереть все изменения и начать заново?')) return;
   mods = []; save(); rebuild(); log.innerHTML = '';
-  addMsg('Мир очищен. Память Claude тоже сброшена.', 'ai');
+  addMsg('Мир очищен. Память ИИ тоже сброшена.', 'ai');
   fetch('/reset', { method: 'POST' });
 });
 
-// ---------- модель ----------
-const modelSel = $('model');
-let models = [];
+// ---------- движок, модель, ускорение ----------
+const engineSel = $('engine'), modelSel = $('model'), fastBox = $('fast'), fastWrap = $('fastWrap');
+let ai = null;   // { engine, model, fast, engines: { claude: { models, fast }, codex: {...} } }
 
-async function loadModels() {
-  try {
-    const r = await (await fetch('/model')).json();
-    models = r.models;
-    modelSel.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
-    modelSel.value = r.model;
-  } catch {}
+function showAi() {
+  engineSel.innerHTML = Object.keys(ai.engines).map(e => `<option value="${e}">${e}</option>`).join('');
+  engineSel.value = ai.engine;
+  modelSel.innerHTML = ai.engines[ai.engine].models.map(m => `<option value="${m}">${m}</option>`).join('');
+  modelSel.value = ai.model;
+  const canFast = ai.engines[ai.engine].fast;
+  fastWrap.classList.toggle('off', !canFast);
+  fastBox.checked = canFast && ai.fast;
 }
 
-async function setModel(name) {
-  if (!models.includes(name)) {
-    modelSel.value = modelSel.dataset.current || modelSel.value;
-    return addMsg(`Нет модели «${name}». Доступны: ${models.join(', ')}`, 'err');
+async function loadAi() {
+  try { ai = await (await fetch('/model')).json(); showAi(); } catch { return; }
+  // Сервер перезапускался и ещё не знает, что уже есть в игре: передаём ему код.
+  if (ai.fresh && mods.length) {
+    fetch('/context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mods: mods.map(m => m.code) }) });
+    addMsg(`ИИ получил код ${mods.length} сохранённых изменений.`, 'ai');
   }
+}
+
+async function setAi(change) {
   const r = await fetch('/model', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: name, mods: mods.map(m => m.code) }),
+    body: JSON.stringify({ ...change, mods: mods.map(m => m.code) }),
   });
   const data = await r.json();
-  if (!r.ok) return addMsg('Ошибка: ' + data.error, 'err');
-  modelSel.value = modelSel.dataset.current = data.model;
-  addMsg(`Модель: ${data.model} (effort low). Передано ей изменений: ${mods.length}.`, 'ai');
+  if (!r.ok) { showAi(); return addMsg('Ошибка: ' + data.error, 'err'); }
+  ai = data; showAi();
+  const speed = ai.engines[ai.engine].fast ? (ai.fast ? ', ⚡ fast' : ', обычная скорость') : '';
+  addMsg(`ИИ: ${ai.engine} / ${ai.model} (effort low${speed}).` +
+    (data.restarted ? ` Передано изменений: ${mods.length}.` : ' Память сохранена.'), 'ai');
 }
 
-modelSel.addEventListener('change', () => { setModel(modelSel.value); modelSel.blur(); });
-loadModels().then(() => modelSel.dataset.current = modelSel.value);
+// Команды в чате: /model sonnet, /model gpt-6-luna, /engine codex, /fast on|off
+function aiCommand(text) {
+  let m = text.match(/^\/?(?:model|модель)\s+(\S+)/i);
+  if (m) {
+    const name = m[1].toLowerCase();
+    const engine = Object.keys(ai.engines).find(e => ai.engines[e].models.includes(name));
+    if (!engine) {
+      const all = Object.entries(ai.engines).map(([e, v]) => `${e}: ${v.models.join(', ')}`).join('; ');
+      addMsg(`Нет модели «${name}». Доступны — ${all}`, 'err');
+    } else setAi({ engine, model: name });
+    return true;
+  }
+  m = text.match(/^\/?(?:engine|движок)\s+(\S+)/i);
+  if (m) { setAi({ engine: m[1].toLowerCase(), model: undefined }); return true; }
+  m = text.match(/^\/?(?:fast|ускорение)\s*(on|off|вкл|выкл)?$/i);
+  if (m) { setAi({ fast: m[1] ? /on|вкл/i.test(m[1]) : !ai.fast }); return true; }
+  return false;
+}
+
+engineSel.addEventListener('change', () => { setAi({ engine: engineSel.value }); engineSel.blur(); });
+modelSel.addEventListener('change', () => { setAi({ model: modelSel.value }); modelSel.blur(); });
+fastBox.addEventListener('change', () => { setAi({ fast: fastBox.checked }); fastBox.blur(); });
+loadAi();
+
+// ---------- сейвы ----------
+const savesBox = $('saves'), savesList = $('savesList');
+
+async function saveGame() {
+  if (!mods.length) return addMsg('Сохранять нечего: изменений пока нет', 'err');
+  const name = prompt('Имя сейва:', new Date().toLocaleString('ru-RU').replace(/[^\d ]+/g, '-'));
+  if (!name) return;
+  const r = await fetch('/saves/' + encodeURIComponent(name), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mods }),
+  });
+  const data = await r.json();
+  if (!r.ok) return addMsg('Не сохранилось: ' + data.error, 'err');
+  addMsg(`💾 Сохранено «${data.name}» (${mods.length} изменений)`, 'ai');
+  if (!savesBox.hidden) showSaves();
+}
+
+async function showSaves() {
+  const list = await (await fetch('/saves')).json();
+  savesList.innerHTML = '';
+  if (!list.length) savesList.textContent = 'Сейвов пока нет. Нажми 💾 сохранить.';
+  for (const s of list) {
+    const row = document.createElement('div');
+    row.className = 'save-row';
+    const name = document.createElement('span');
+    name.className = 'name'; name.textContent = s.name; name.title = 'Загрузить';
+    const info = document.createElement('small');
+    info.textContent = `${s.count} изм. · ${new Date(s.time).toLocaleString('ru-RU', { dateStyle: 'short', timeStyle: 'short' })}`;
+    const dl = document.createElement('button'); dl.textContent = '⬇'; dl.title = 'Скачать код .js';
+    const del = document.createElement('button'); del.textContent = '🗑'; del.title = 'Удалить сейв';
+    name.onclick = () => loadGame(s.name);
+    dl.onclick = () => downloadCode(s.name);
+    del.onclick = async () => {
+      if (!confirm(`Удалить сейв «${s.name}»?`)) return;
+      await fetch('/saves/' + encodeURIComponent(s.name), { method: 'DELETE' });
+      showSaves();
+    };
+    row.append(name, info, dl, del);
+    savesList.append(row);
+  }
+  savesBox.hidden = false;
+}
+
+async function loadGame(name) {
+  const r = await fetch('/saves/' + encodeURIComponent(name));
+  const data = await r.json();
+  if (!r.ok) return addMsg('Не загрузилось: ' + data.error, 'err');
+  mods = data.mods; save(); rebuild();
+  savesBox.hidden = true;
+  addMsg(`📂 Загружено «${name}» (${mods.length} изменений). ИИ получил этот код.`, 'ai');
+  fetch('/context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mods: mods.map(m => m.code) }) });
+}
+
+async function downloadCode(name) {
+  const data = await (await fetch('/saves/' + encodeURIComponent(name))).json();
+  const js = data.mods.map((m, i) => `// ===== ${i + 1}. ${m.text}\n${m.code}`).join('\n\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([js], { type: 'text/javascript' }));
+  a.download = name + '.js';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+$('saveBtn').addEventListener('click', saveGame);
+$('loadBtn').addEventListener('click', () => savesBox.hidden ? showSaves() : (savesBox.hidden = true));
+$('savesClose').addEventListener('click', () => savesBox.hidden = true);
 
 // ---------- голос ----------
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -182,4 +277,4 @@ micBtn.addEventListener('click', toggleMic);
 rebuild();
 addMsg(mods.length
   ? `Восстановлено изменений: ${mods.length}. Пиши или говори, что добавить.`
-  : 'Пустой платформер. Enter — написать, ` или 🎤 — сказать голосом, что добавить в игру. «/model sonnet» — сменить модель.', 'ai');
+  : 'Пустой платформер. Enter — написать, ` или 🎤 — сказать голосом, что добавить в игру. Внизу — выбор ИИ (Claude или Codex), модели и ⚡ ускорения.', 'ai');

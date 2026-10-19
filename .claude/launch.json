@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["server.js"],
       "port": 5173
+    },
+    {
+      "name": "game-test",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.js", "5174"],
+      "port": 5174
     }
   ]
 }
