@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Живой платформер</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="panel">
+  <div id="log"></div>
+  <form id="chat" autocomplete="off">
+    <button type="button" id="mic" title="Голос (клавиша `)">🎤</button>
+    <input id="input" placeholder="Enter — написать, что поменять в игре…">
+    <button type="submit">↵</button>
+  </form>
+  <div id="tools">
+    <button type="button" id="undo" title="Отменить последнее изменение">↶ отмена</button>
+    <button type="button" id="reset" title="Стереть всё и начать с пустого платформера">⟲ сброс</button>
+    <select id="model" title="Модель Claude (у всех effort low)"></select>
+    <span id="status"></span>
+  </div>
+</div>
+
+<script src="engine.js"></script>
+<script src="live.js"></script>
+</body>
+</html>

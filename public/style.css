@@ -1,0 +1,27 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: #111; font: 14px/1.4 system-ui, sans-serif; color: #eee; }
+canvas { display: block; width: 100vw; height: 100vh; }
+
+#panel {
+  position: fixed; left: 16px; bottom: 16px; width: min(460px, calc(100vw - 32px));
+  display: flex; flex-direction: column; gap: 6px; pointer-events: none;
+}
+#log { max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; pointer-events: auto; }
+.msg { padding: 6px 10px; border-radius: 8px; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); word-break: break-word; }
+.msg.me { background: rgba(40,90,200,.6); align-self: flex-start; }
+.msg.ai { background: rgba(20,120,70,.6); }
+.msg.err { background: rgba(170,40,40,.7); }
+.msg.wait { opacity: .7; font-style: italic; }
+.msg small { opacity: .7; margin-left: 6px; }
+
+#chat { display: flex; gap: 6px; pointer-events: auto; }
+#chat input { flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid #444; background: rgba(0,0,0,.6); color: #fff; font: inherit; outline: none; }
+#chat input:focus { border-color: #6af; }
+button { padding: 8px 12px; border-radius: 8px; border: 1px solid #444; background: rgba(30,30,30,.8); color: #eee; font: inherit; cursor: pointer; }
+button:hover { background: rgba(60,60,60,.9); }
+#mic.on { background: #c33; border-color: #f66; animation: pulse 1s infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(255,80,80,.3); } }
+#tools { display: flex; gap: 6px; align-items: center; pointer-events: auto; }
+#tools button { padding: 4px 10px; font-size: 12px; }
+#model { padding: 4px 6px; border-radius: 8px; border: 1px solid #444; background: rgba(30,30,30,.8); color: #eee; font: inherit; font-size: 12px; cursor: pointer; }
+#status { font-size: 12px; opacity: .8; }
