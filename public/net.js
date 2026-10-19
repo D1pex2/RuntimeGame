@@ -1,5 +1,6 @@
 // Мультиплеер по локальной сети. Сервер хранит общий список изменений и пересылает сообщения.
-// Хост (первый вошедший) считает мир и раз в 50 мс рассылает снимок; каждый двигает своего персонажа сам.
+// Хост (первый вошедший) считает мир и 30 раз в секунду рассылает снимок; каждый двигает своего персонажа сам.
+// Чужие положения показываются с задержкой game.netDelay и плавно между снимками.
 const NAME_KEY = 'live-platformer-name';
 const COLORS = ['#3a8dff', '#2ecc71', '#b65cff', '#ffb02e', '#ff4fa3', '#20c9c9', '#c0392b'];
 
@@ -50,6 +51,7 @@ const net = {
     // Пока хост только что поменял этого игрока (урон, отскок), не даём старым данным его перезаписать.
     const locked = r._lock && game.time < r._lock;
     for (const k in s) if (!(locked && ['hp', 'dead', 'deadT', 'invuln', 'vx', 'vy'].includes(k))) r[k] = s[k];
+    if ('x' in s) game.track(r, r.x, r.y);
   },
 
   onMessage(m) {
@@ -114,7 +116,7 @@ steadyInterval(() => {
   if (!net.online) return;
   net.send({ t: 'player', s: playerState(game.player) });
   if (net.role === 'host' && net.remotes.size) net.send({ t: 'snap', ...game.snapshot() });
-}, 50);
+}, 33);
 
 function netStatus() {
   const el = document.getElementById('net');

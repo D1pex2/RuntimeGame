@@ -102,6 +102,31 @@ function createGame() {
     return { e: ents, s: state };
   };
 
+  // Плавность по сети: положения из сети показываем с небольшой задержкой и тянем
+  // между двумя соседними снимками, а не прыгаем от снимка к снимку.
+  g.netDelay = 100;
+  g.track = (o, x, y) => {
+    const buf = o._buf || (o._buf = []);
+    const now = performance.now();
+    buf.push({ t: now, x, y });
+    while (buf.length > 2 && buf[1].t < now - 1000) buf.shift();
+  };
+  g.interp = (o, t = performance.now() - g.netDelay) => {
+    const buf = o._buf;
+    if (!buf || !buf.length) return null;
+    if (t <= buf[0].t) return buf[0];
+    for (let i = buf.length - 1; i > 0; i--) {
+      const a = buf[i - 1], b = buf[i];
+      if (t >= a.t) {
+        if (t >= b.t) return b;
+        if (Math.abs(b.x - a.x) + Math.abs(b.y - a.y) > 400) return b;   // телепорт, респавн
+        const k = (t - a.t) / (b.t - a.t);
+        return { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k };
+      }
+    }
+    return buf[buf.length - 1];
+  };
+
   // Клиент применяет снимок: известные объекты обновляет, новые создаёт, пропавшие убирает.
   g.applySnapshot = snap => {
     const byId = new Map(g.entities.map(e => [e.id, e]));
@@ -115,6 +140,7 @@ function createGame() {
         e = { draw: twin ? twin.draw : (o.tag && g._templates[o.tag]) || null, mod: twin ? twin.mod : null };
       }
       if (!e.draw && o.tag && g._templates[o.tag]) e.draw = g._templates[o.tag];
+      g.track(e, o.x, o.y);
       return Object.assign(e, o);
     });
     if (snap.s) Object.assign(g.state, snap.s);
@@ -222,9 +248,9 @@ function createGame() {
   };
 
   g.updateEntities = dt => {
-    // У клиента мир считает хост; между снимками просто двигаем объекты по скорости.
+    // У клиента мир считает хост; объекты плавно ведём между его снимками.
     if (g.role === 'client') {
-      for (const e of g.entities) { e.x += (e.vx || 0) * dt; e.y += e.gravity ? 0 : (e.vy || 0) * dt; }
+      for (const e of g.entities) { const p = g.interp(e); if (p) { e.x = p.x; e.y = p.y; } }
       return;
     }
     for (const e of g.entities) {
@@ -278,8 +304,11 @@ function createGame() {
       else { c.fillStyle = e.color; c.fillRect(e.x, e.y, e.w, e.h); }
     }
     for (const r of g.remotes.values()) {
-      try { r.draw = g.player.draw; g.drawPlayer(c, r); } catch (e) { g.fail(e, null, 'drawPlayer'); }
-      if (!r.dead) g.text(c, r.name || 'игрок', r.x + r.w / 2, r.y - 10, { size: 14, align: 'center', color: '#fff' });
+      // Рисуем плавное положение; настоящее (последнее из сети) остаётся в r для столкновений.
+      const p = g.interp(r);
+      const view = p ? Object.assign(Object.create(r), { x: p.x, y: p.y }) : r;
+      try { r.draw = g.player.draw; g.drawPlayer(c, view); } catch (e) { g.fail(e, null, 'drawPlayer'); }
+      if (!r.dead) g.text(c, r.name || 'игрок', view.x + r.w / 2, view.y - 10, { size: 14, align: 'center', color: '#fff' });
     }
     try { g.drawPlayer(c, g.player); } catch (e) { g.drawPlayer = g._drawPlayerDefault; g.fail(e, null, 'drawPlayer'); }
     for (const q of g.parts) { c.globalAlpha = q.life / q.max; c.fillStyle = q.color; c.fillRect(q.x - q.size / 2, q.y - q.size / 2, q.size, q.size); }
