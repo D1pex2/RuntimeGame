@@ -278,12 +278,16 @@ function json(res, code, obj) {
 
 async function handle(req, res) {
   if (req.method === 'POST' && req.url === '/ask') {
-    const { text, error, name } = JSON.parse(await readBody(req) || '{}');
+    const { text, error, name, voice, alts } = JSON.parse(await readBody(req) || '{}');
     contextSent = true;
     const who = name ? `Игрок «${String(name).slice(0, 30)}»` : 'Игрок';
+    // Голос распознаёт браузер и часто ошибается — даём модели варианты и просим понять по смыслу.
+    const heard = voice
+      ? ` (сказал голосом; распознавание могло исказить слова — пойми по смыслу и созвучию${Array.isArray(alts) && alts.length ? '; другие варианты распознавания: ' + alts.slice(0, 4).map(a => `«${String(a).slice(0, 200)}»`).join(', ') : ''})`
+      : '';
     const prompt = error
       ? `Твой прошлый код упал с ошибкой: ${error}\nПришли исправленный код (только то, что нужно добавить).`
-      : `${who}: ${text}`;
+      : `${who}${heard}: ${text}`;
     console.log('>', prompt.split('\n')[0]);
     try {
       const r = await ask(prompt);

@@ -85,14 +85,15 @@ async function request(body) {
   }
 }
 
-function sendText(text) {
+// voice: { voice: true, alts: [...] } — фраза распознана голосом, alts — другие варианты распознавания.
+function sendText(text, voice) {
   text = text.trim();
   if (!text) return;
   if (ai && aiCommand(text)) return;
-  addMsg(text, 'me');
-  net.send({ t: 'chat', text });
+  addMsg((voice ? '🎤 ' : '') + text, 'me');
+  net.send({ t: 'chat', text: (voice ? '🎤 ' : '') + text });
   fixBudget = 2;
-  request({ text });
+  request({ text, ...voice });
 }
 
 // ---------- чат ----------
@@ -258,19 +259,42 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let rec = null, listening = false;
 if (!SR) { micBtn.disabled = true; micBtn.title = 'Голос работает в Chrome или Edge'; }
 
+// Распознанные куски копим и отправляем одной фразой, когда игрок замолчал.
+const VOICE_PAUSE = 1500;
+const PLACEHOLDER = inputEl.placeholder;
+let voiceParts = [], voiceAlts = [], voiceTimer = null;
+
+function flushVoice() {
+  clearTimeout(voiceTimer); voiceTimer = null;
+  inputEl.placeholder = PLACEHOLDER;
+  const text = voiceParts.join(' ').replace(/\s+/g, ' ').trim();
+  // Варианты целой фразы: лучший вариант каждого куска, кроме одного, где берём альтернативу.
+  const alts = [];
+  voiceAlts.forEach((list, i) => list.slice(1).forEach(alt => {
+    const v = voiceParts.slice(); v[i] = alt;
+    alts.push(v.join(' ').replace(/\s+/g, ' ').trim());
+  }));
+  voiceParts = []; voiceAlts = [];
+  if (text) sendText(text, { voice: true, alts: alts.slice(0, 4) });
+}
+
 function toggleMic() {
   if (!SR) return addMsg('Голос поддерживается только в Chrome или Edge', 'err');
-  if (listening) { listening = false; rec && rec.stop(); return; }
+  if (listening) { listening = false; rec && rec.stop(); flushVoice(); return; }
   rec = new SR();
-  rec.lang = 'ru-RU'; rec.continuous = true; rec.interimResults = true;
+  rec.lang = 'ru-RU'; rec.continuous = true; rec.interimResults = true; rec.maxAlternatives = 3;
   rec.onresult = ev => {
     let interim = '';
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
-      if (r.isFinal) { inputEl.placeholder = 'Enter — написать, что поменять в игре…'; sendText(r[0].transcript); }
-      else interim += r[0].transcript;
+      if (r.isFinal) {
+        voiceParts.push(r[0].transcript.trim());
+        voiceAlts.push([...r].map(a => a.transcript.trim()).filter((t, j, all) => t && all.indexOf(t) === j));
+      } else interim += r[0].transcript;
     }
-    if (interim) inputEl.placeholder = '🎤 ' + interim;
+    inputEl.placeholder = '🎤 ' + [...voiceParts, interim].join(' ').trim() + ' …';
+    clearTimeout(voiceTimer);
+    voiceTimer = setTimeout(flushVoice, VOICE_PAUSE);
   };
   rec.onerror = ev => { if (ev.error !== 'no-speech') addMsg('Микрофон: ' + ev.error, 'err'); };
   rec.onend = () => { if (listening) rec.start(); else micBtn.classList.remove('on'); };
