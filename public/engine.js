@@ -95,21 +95,40 @@ function createGame() {
         if (prim(v)) o[k] = v;
         else if (typeof v === 'object') { try { const s = JSON.stringify(v); if (s.length < 400) o[k] = JSON.parse(s); } catch {} }
       }
+      // Объекты из настройки модов у клиента уже есть со своим рисованием; для остальных шлём код.
+      if (typeof e.draw === 'function' && e.id && e.id[0] === 'h') o.__d = drawId(e.draw);
       ents.push(o);
     }
     let state = null;
     try { state = JSON.parse(JSON.stringify(g.state)); } catch {}
-    return { e: ents, s: state };
+    // Новый код рисования — сразу, весь набор — раз в секунду (для тех, кто зашёл позже).
+    g._snapN = (g._snapN || 0) + 1;
+    let d = null;
+    if (g._snapN % 30 === 0) { d = {}; for (const [f, id] of g._drawIds) d[id] = f.toString(); }
+    else if (Object.keys(g._drawNew).length) d = g._drawNew;
+    g._drawNew = {};
+    return { e: ents, s: state, d, ts: g.time };
   };
 
   // Плавность по сети: положения из сети показываем с небольшой задержкой и тянем
   // между двумя соседними снимками, а не прыгаем от снимка к снимку.
   g.netDelay = 100;
-  g.track = (o, x, y) => {
+  g.track = (o, x, y, t = performance.now()) => {
     const buf = o._buf || (o._buf = []);
-    const now = performance.now();
-    buf.push({ t: now, x, y });
-    while (buf.length > 2 && buf[1].t < now - 1000) buf.shift();
+    if (buf.length && t <= buf[buf.length - 1].t) t = buf[buf.length - 1].t + 1;
+    buf.push({ t, x, y });
+    while (buf.length > 2 && buf[1].t < t - 1000) buf.shift();
+  };
+  // Время отправителя (секунды его игры) → наши миллисекунды. Сдвиг часов берём по самому
+  // быстрому приходу и медленно подстраиваем: так метки ровные, даже если сеть дёргается.
+  g.mapTime = (holder, sec) => {
+    if (typeof sec !== 'number') return performance.now();
+    const ms = sec * 1000, off = performance.now() - ms;
+    let c = holder._clk;
+    if (c === undefined || off < c || off - c > 1000) c = off;
+    else c += (off - c) * 0.02;
+    holder._clk = c;
+    return ms + c;
   };
   g.interp = (o, t = performance.now() - g.netDelay) => {
     const buf = o._buf;
@@ -127,8 +146,64 @@ function createGame() {
     return buf[buf.length - 1];
   };
 
+  // Объекты мира у клиента: без задержки, положение предсказываем по скорости от последнего снимка
+  // (скорость меряем по двум последним снимкам — так верно, даже если мод двигает объект сам).
+  // Когда приходит новый снимок и предсказание чуть разошлось, ошибка гасится за ~0.1 с, а не скачком.
+  g.predict = (e, dt) => {
+    const buf = e._buf;
+    if (!buf || !buf.length) return;
+    const b = buf[buf.length - 1], a = buf[buf.length - 2];
+    let vx = e.vx || 0, vy = e.gravity ? 0 : (e.vy || 0);
+    if (a && b.t - a.t > 5) { vx = (b.x - a.x) / (b.t - a.t) * 1000; vy = (b.y - a.y) / (b.t - a.t) * 1000; }
+    const now = performance.now();
+    const at = (s, svx, svy) => {
+      const ahead = Math.min(now - s.t, 120) / 1000;
+      return [s.x + svx * ahead, s.y + svy * ahead];
+    };
+    const [tx, ty] = at(b, vx, vy);
+    if (e._seen !== b) {
+      // Новый снимок: сравниваем со старым предсказанием на этот же момент и плавно гасим разницу.
+      if (e._seen) {
+        const [px, py] = at(e._seen, e._pvx, e._pvy);
+        e._ox = px + (e._ox || 0) - tx; e._oy = py + (e._oy || 0) - ty;
+        if (Math.abs(e._ox) + Math.abs(e._oy) > 300) e._ox = e._oy = 0;   // телепорт
+      }
+      e._seen = b; e._pvx = vx; e._pvy = vy;
+    }
+    const k = Math.pow(0.82, dt * 60);
+    e._ox = (e._ox || 0) * k; e._oy = (e._oy || 0) * k;
+    e.x = tx + e._ox; e.y = ty + e._oy;
+  };
+
+  // Код рисования объектов, созданных во время игры: хост пересылает его текстом,
+  // чтобы у клиентов пули и прочее выглядели так же, а не цветными квадратами.
+  g._drawIds = new Map(); g._drawNew = {}; g._drawFns = {};
+  const drawId = fn => {
+    let id = g._drawIds.get(fn);
+    if (!id) {
+      const src = fn.toString();
+      for (const [f, i] of g._drawIds) if (f.toString() === src) { id = i; break; }
+      if (!id) { id = 'd' + (g._drawIds.size + 1); g._drawNew[id] = src; }
+      g._drawIds.set(fn, id);
+    }
+    return id;
+  };
+  const compileDraw = src => {
+    // Метод draw(ctx, e) {...} превращаем в function draw(ctx, e) {...}.
+    const code = /^(async\s+)?(function\b|\(|[\w$]+\s*=>)/.test(src) ? src : 'function ' + src;
+    try {
+      const fn = new Function('return (' + code + ')')();
+      return function (c, e, game) {
+        try { fn.call(this, c, e, game); }
+        catch { c.fillStyle = e.color || '#fc0'; c.fillRect(e.x, e.y, e.w, e.h); }
+      };
+    } catch { return null; }
+  };
+
   // Клиент применяет снимок: известные объекты обновляет, новые создаёт, пропавшие убирает.
   g.applySnapshot = snap => {
+    if (snap.d) for (const id in snap.d) if (!g._drawFns[id]) g._drawFns[id] = compileDraw(snap.d[id]);
+    const t = g.mapTime(g, snap.ts);
     const byId = new Map(g.entities.map(e => [e.id, e]));
     const byTag = new Map();
     for (const e of g.entities) if (e.tag && !byTag.has(e.tag)) byTag.set(e.tag, e);
@@ -140,7 +215,8 @@ function createGame() {
         e = { draw: twin ? twin.draw : (o.tag && g._templates[o.tag]) || null, mod: twin ? twin.mod : null };
       }
       if (!e.draw && o.tag && g._templates[o.tag]) e.draw = g._templates[o.tag];
-      g.track(e, o.x, o.y);
+      if (!e.draw && o.__d && g._drawFns[o.__d]) e.draw = g._drawFns[o.__d];
+      g.track(e, o.x, o.y, t);
       return Object.assign(e, o);
     });
     if (snap.s) Object.assign(g.state, snap.s);
@@ -248,9 +324,9 @@ function createGame() {
   };
 
   g.updateEntities = dt => {
-    // У клиента мир считает хост; объекты плавно ведём между его снимками.
+    // У клиента мир считает хост; объекты ведём предсказанием между его снимками.
     if (g.role === 'client') {
-      for (const e of g.entities) { const p = g.interp(e); if (p) { e.x = p.x; e.y = p.y; } }
+      for (const e of g.entities) g.predict(e, dt);
       return;
     }
     for (const e of g.entities) {

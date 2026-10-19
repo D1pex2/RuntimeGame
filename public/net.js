@@ -19,7 +19,7 @@ const net = {
     g.remotes = this.remotes;
     g.onPatch = (id, d) => this.send({ t: 'patch', to: id, d });
     // Нажатие уходит вместе со свежим состоянием персонажа: куда смотрит, где стоит.
-    g.onInput = (kind, args) => this.send({ t: 'event', kind, args, s: playerState(g.player) });
+    g.onInput = (kind, args) => this.send({ t: 'event', kind, args, s: { ...playerState(g.player), __t: g.time } });
     // У каждого свой цвет, если моды не перекрасили персонажа.
     if (this.online && g.player.color === '#ff5a36' && this.id > 1) g.player.color = COLORS[(this.id - 2) % COLORS.length];
     g.spawn.x += this.online ? ((this.id || 1) - 1) % 5 * 50 : 0;
@@ -51,7 +51,7 @@ const net = {
     // Пока хост только что поменял этого игрока (урон, отскок), не даём старым данным его перезаписать.
     const locked = r._lock && game.time < r._lock;
     for (const k in s) if (!(locked && ['hp', 'dead', 'deadT', 'invuln', 'vx', 'vy'].includes(k))) r[k] = s[k];
-    if ('x' in s) game.track(r, r.x, r.y);
+    if ('x' in s) game.track(r, r.x, r.y, game.mapTime(r, s.__t));
   },
 
   onMessage(m) {
@@ -114,7 +114,7 @@ function playerState(p) {
 
 steadyInterval(() => {
   if (!net.online) return;
-  net.send({ t: 'player', s: playerState(game.player) });
+  net.send({ t: 'player', s: { ...playerState(game.player), __t: game.time } });
   if (net.role === 'host' && net.remotes.size) net.send({ t: 'snap', ...game.snapshot() });
 }, 33);
 
