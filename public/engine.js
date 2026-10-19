@@ -42,6 +42,9 @@ function createGame() {
   g.add = e => {
     const setup = g.currentMod !== null;
     const o = { x: 0, y: 0, w: 32, h: 32, vx: 0, vy: 0, color: '#fc0', mod: g.currentMod, ...e, id: (setup ? 's' : 'h') + (++g._seq) };
+    // Создано игроком во время игры (пуля, граната): сначала не задевает самого создателя.
+    if (!setup && !('_owner' in o)) o._owner = g.player;
+    o._age = 0;
     if (g.role === 'client' && !setup) {
       // Сам объект придёт от хоста; запоминаем, как его рисовать.
       if (o.tag && typeof o.draw === 'function') g._templates[o.tag] = o.draw;
@@ -230,7 +233,9 @@ function createGame() {
         if (e.gravity) { e.vy += g.gravity * dt; g.moveBody(e, dt); }
         else { e.x += e.vx * dt; e.y += e.vy * dt; }
         if (e.update) e.update(e, dt, g);
+        e._age = (e._age || 0) + dt;
         if (e.onTouch) for (const p of g.players()) {
+          if (p === e._owner && e._age < 0.3) continue;
           if (!p.dead && !e._dead && g.overlap(e, p)) g.withPlayer(p, () => e.onTouch(e, p, g));
         }
         if (e.life !== undefined && (e.life -= dt) <= 0) e._dead = true;
@@ -325,17 +330,36 @@ canvas.addEventListener('mousedown', e => {
 });
 addEventListener('mouseup', () => input.mouse.down = false);
 
+// Таймер, который не засыпает в фоновой вкладке: браузер тормозит setInterval и останавливает
+// requestAnimationFrame у скрытых вкладок, а таймеры внутри Worker — нет.
+function steadyInterval(fn, ms) {
+  try {
+    const src = `setInterval(() => postMessage(0), ${ms})`;
+    const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    w.onmessage = () => fn();
+    return w;
+  } catch { return setInterval(fn, ms); }
+}
+
 let last = performance.now();
-function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+function step(now, draw) {
+  const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now;
   const cam = game.camera;
   input.mouse.worldX = cam.x + input.mouse.x / cam.zoom;
   input.mouse.worldY = cam.y + input.mouse.y / cam.zoom;
   try { game.update(dt); } catch (e) { game.restoreCore(); game.fail(e, null, 'главный update (функции движка восстановлены)'); }
-  try { game.draw(); } catch (e) { game.restoreCore(); game.fail(e, null, 'главный draw (функции движка восстановлены)'); }
+  if (draw) try { game.draw(); } catch (e) { game.restoreCore(); game.fail(e, null, 'главный draw (функции движка восстановлены)'); }
   input.justPressed.clear();
+}
+let lastFrame = 0;
+function frame(now) {
+  lastFrame = performance.now();
+  step(now, true);
   requestAnimationFrame(frame);
 }
+// Кадров давно не было (вкладка в фоне, окно свёрнуто или перекрыто): мир всё равно считается —
+// иначе у хоста замирают пули и враги у всех остальных игроков.
+steadyInterval(() => { if (performance.now() - lastFrame > 100) step(performance.now(), false); }, 16);
 
 resize();
 window.game = createGame();

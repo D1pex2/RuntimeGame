@@ -110,7 +110,7 @@ function playerState(p) {
   return s;
 }
 
-setInterval(() => {
+steadyInterval(() => {
   if (!net.online) return;
   net.send({ t: 'player', s: playerState(game.player) });
   if (net.role === 'host' && net.remotes.size) net.send({ t: 'snap', ...game.snapshot() });
